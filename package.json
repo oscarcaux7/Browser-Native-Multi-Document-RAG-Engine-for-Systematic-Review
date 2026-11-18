@@ -1,0 +1,11 @@
+{
+  "name": "synapse-browser-rag",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Browser-native multi-document RAG: PDF parsing, embeddings, hybrid search and a local LLM, all client-side.",
+  "type": "module",
+  "scripts": {
+    "start": "python3 -m http.server 8000",
+    "test": "node --test tests/*.test.mjs"
+  }
+}

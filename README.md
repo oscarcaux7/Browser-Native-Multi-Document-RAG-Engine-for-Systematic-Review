@@ -1,168 +1,120 @@
-#  Synapse - Local RAG Research Assistant
+# Synapse: browser-native RAG over your PDFs
 
-> **A privacy-first, fully browser-based AI research assistant that runs entirely on your device.**
+Ask questions about a set of PDFs and get answers with **clickable citations down to the page**.
+PDF parsing, embeddings, vector search and the language model all run **inside the browser**.
+There is no server and no API key, and documents are never uploaded.
 
-![Synapse Interface](Synapse.png)
+**Live demo:** https://oscarcaux7.github.io/Browser-Native-Multi-Document-RAG-Engine-for-Systematic-Review/
+(no PDF at hand? the demo has a *Try two sample papers* button with fictional documents)
 
----
+![Synapse answering questions with page-level citations, the cited page open on the right](assets/screenshot.webp)
 
-## What is Synapse?
+## What it does
 
-Synapse is a **Retrieval Augmented Generation (RAG)** system that lets you chat with your PDF documents using AI. Unlike cloud-based solutions like ChatGPT or Claude, Synapse runs **100% locally in your browser** - your documents never leave your computer.
+- **Drop PDFs** (several at once). Each one is parsed, split into passages and embedded in a background worker, with a progress bar per file. The UI stays responsive, even on a 180-page document.
+- **Ask questions.** The answer streams token by token. Each claim carries a citation chip such as `[2]`.
+- **Click a citation** to open the original PDF page, with the retrieved passage highlighted.
+- **Literature overview**: a structured summary that compares all the documents in the library (built for systematic-review work).
+- **It persists.** Model weights, PDFs and the vector index are cached in the browser, so a reload is ready in seconds without downloading anything again.
+- Light and dark themes, phone layout, settings for the model, retrieval depth, temperature and answer length.
 
-### Privacy-First Architecture
-
-| Traditional AI | Synapse (Local AI) |
-|---------------|-------------------|
-| Documents uploaded to cloud servers | Documents stay on YOUR device |
-| Data may be used for training | Zero data collection |
-| Requires internet connection | Works offline after model loads |
-| Privacy policies you can't verify | Complete transparency |
-
-**Your research papers, confidential documents, and sensitive data remain private.**
-
----
-
-## Tech Stack
-
-| Technology | Purpose |
-|-----------|---------|
-| **[WebLLM](https://webllm.mlc.ai/)** | Runs LLMs directly in browser via WebGPU |
-| **[Transformers.js](https://huggingface.co/docs/transformers.js/)** | Generates text embeddings for semantic search |
-| **[PDF.js](https://mozilla.github.io/pdf.js/)** | Extracts text from PDF documents |
-| **[Tailwind CSS](https://tailwindcss.com/)** | Modern, responsive UI styling |
-| **Vanilla JavaScript** | No framework dependencies, pure ES modules |
-
-### How the RAG Pipeline Works
+## How it works
 
 ```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│   PDF.js    │────▶│  Chunking   │────▶│ Transformers│
-│  Extraction │     │  (400 char) │     │  Embedding  │
-└─────────────┘     └─────────────┘     └─────────────┘
-                                              │
-                                              ▼
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│   WebLLM    │◀────│   Context   │◀────│   Vector    │
-│  Response   │     │  Retrieval  │     │    Store    │
-└─────────────┘     └─────────────┘     └─────────────┘
+ PDF ──► PDF.js text ──► page-aware chunks ──► embeddings ──► IndexedDB
+                          (~900 chars, never     (transformers.js,
+                           crosses a page)        WebGPU or WASM)
+                                                       │
+ question ──► query embedding ──► dense cosine top-40 ─┤
+          └─► BM25 keyword top-40 ─────────────────────┴─► Reciprocal Rank Fusion ──► top-k passages
+                                                                                          │
+                       streamed answer with [n] citations ◄── local LLM (WebLLM on WebGPU) ◄┘
 ```
 
-1. **Extract** - PDF.js pulls raw text from uploaded PDFs
-2. **Chunk** - Text is split into 400-character overlapping segments
-3. **Embed** - Transformers.js creates 384-dimensional vectors
-4. **Store** - Vectors are stored in a client-side array (no database needed)
-5. **Search** - User queries are embedded and matched via cosine similarity
-6. **Generate** - Top matching chunks are sent to WebLLM for response
+| Part | Implementation |
+|---|---|
+| UI thread | Vanilla ES modules, no framework and no build step. Hand-written CSS with light/dark tokens. |
+| `rag-worker.js` | PDF.js 6.5 text extraction → sentence-aligned chunking → batched embeddings → hybrid search. Owns the index and IndexedDB. |
+| `llm-worker.js` | The chat model, kept off the UI thread. **WebLLM 0.2.88** on WebGPU, or a **transformers.js 4.3** CPU fallback. Streams tokens back. |
+| Retrieval | Dense vectors (L2-normalised, dot product) **plus BM25** fused with RRF, so exact terms such as model names and numbers are not lost. |
+| Citations | Sources are numbered in the prompt. The model is told to cite `[n]`, and the answer is parsed and rendered as buttons linked to `{document, page, passage}`. |
+| Storage | IndexedDB holds the PDFs and the chunks + vectors per embedding model. The Cache API holds model weights (managed by WebLLM and transformers.js). |
 
----
+### Models
 
-## Quick Start
+All model ids were checked against the WebLLM `prebuiltAppConfig` and the Hugging Face Hub.
 
-### Prerequisites
+| Role | Model | Download | Runs on |
+|---|---|---|---|
+| Chat (default) | Qwen3.5 2B (`Qwen3.5-2B-q4f16_1-MLC`) | ≈1.1 GB | WebGPU |
+| Chat (light, phones) | Qwen3.5 0.8B | ≈0.45 GB | WebGPU |
+| Chat (best) | Qwen3.5 4B | ≈2.4 GB | WebGPU (~3.9 GB VRAM) |
+| Chat (alternatives) | Gemma 4 E2B, Llama 3.2 3B | 1.8–2.8 GB | WebGPU |
+| Chat (fallback) | Qwen3 0.6B (`onnx-community/Qwen3-0.6B-ONNX`, q8) | ≈0.6 GB | CPU (WebAssembly) |
+| Embeddings | BGE small en v1.5 (384-d, CLS pooling) | 35–65 MB | WebGPU, else WASM |
 
-- **Modern Browser** with WebGPU support (Chrome 113+, Edge 113+)
-- **GPU** with 4GB+ VRAM recommended (works with less, but slower)
-- **Local Server** (required due to ES Modules and CORS)
+Reasoning ("thinking") mode is switched off for the Qwen models: short, grounded answers suit RAG better.
+If the GPU lacks 16-bit float support, the f32 builds are picked automatically.
+The 0.8B model is picked by default on phones and low-memory devices.
 
-### Option 1: Python (Recommended)
+### Measured on a laptop (AMD Ryzen 7 / Radeon 780M iGPU, Chrome 157, Linux)
+
+| What | Result |
+|---|---|
+| Index 2 short papers (9 pages, 19 passages), WebGPU embeddings | ≈1.6 s |
+| Index a 180-page PDF (540 passages), WebGPU embeddings | 3.6 s; longest UI frame during indexing 17 ms (no freeze) |
+| Reload with everything cached (library, index, chat model) | ready in ≈2–6 s, no network download |
+| Qwen3.5 0.8B decode speed on the iGPU (WebGPU) | ≈22 tokens/s |
+| CPU fallback (Qwen3 0.6B, WebAssembly, cross-origin isolated) | ≈3.4 tokens/s; ≈45 s for a cited answer from 4 passages |
+
+On this particular Linux + AMD iGPU setup, WebGPU (still behind a flag on Linux) hit GPU driver resets on long prompts. Where that happens, the app restarts the model worker and reloads the model from cache instead of hanging.
+
+## Run locally
+
+ES modules and workers need an HTTP server (not `file://`):
 
 ```bash
-# Clone or download this repository
-cd LLM_PROJECT
-
-# Start a local server
-python -m http.server 8000
-
-# Open in browser
-# Navigate to: http://localhost:8000
+python3 -m http.server 8000
+# open http://localhost:8000
 ```
 
-### Option 2: VS Code Live Server
-
-1. Install the **Live Server** extension in VS Code
-2. Open the project folder
-3. Right-click `index.html` → **Open with Live Server**
-
-### Option 3: Node.js
+Unit tests for chunking, BM25/RRF, citation parsing and the Markdown renderer (Node 20+, no dependencies):
 
 ```bash
-# Install a simple server
-npm install -g serve
-
-# Run it
-cd LLM_PROJECT
-serve .
-
-# Open the URL shown in terminal
+npm test
 ```
 
----
+**Browser support.** The fast path needs WebGPU: Chrome/Edge 113+ on desktop, recent Chrome on Android, Safari 26+.
+Without WebGPU the app still works on the CPU, but answers take noticeably longer.
 
-## Usage Guide
-
-### Step 1: Load the Models
-
-1. Wait for the embedding model to load automatically (~20 seconds)
-2. Select an LLM from the **right sidebar dropdown**:
-   - **Llama 3.2 1B** - Fast, lower VRAM (~2GB)
-   - **Llama 3.2 3B** - Better quality, needs ~4GB VRAM
-   - **SmolLM2 1.7B** - Good balance
-   - **Qwen 2.5 1.5B** - Good for multilingual docs
-3. Click **" Load Selected Model"**
-
-### Step 2: Upload Documents
-
-1. Drag & drop PDF files onto the left sidebar
-2. Wait for processing (you'll see chunk count appear)
-3. Multiple PDFs can be indexed simultaneously
-
-### Step 3: Ask Questions
-
-- Type your question in the chat input
-- Press Enter or click ➔
-- The AI will answer based on your document content
-
-### Step 4: Generate Literature Review
-
-- Click **" Generate Lit Review"** for an automated summary
-- Adjust **Temperature** slider for creativity (0.2 = factual, 0.8 = creative)
-
----
-
-## ⚙️ System Requirements
-
-| Component | Minimum | Recommended |
-|-----------|---------|-------------|
-| Browser | Chrome 113+ | Chrome 120+ |
-| GPU | Integrated | Discrete (4GB VRAM) |
-| RAM | 8GB | 16GB |
-| Storage | 2GB free | 5GB free (for model cache) |
-
-### Troubleshooting
-
-| Issue | Solution |
-|-------|----------|
-| "WebGPU not supported" | Update Chrome/Edge to latest version |
-| Model loading fails | Try a smaller model (1B instead of 3B) |
-| Slow performance | Close other GPU-intensive tabs/apps |
-| SharedArrayBuffer error | Use a proper local server (not file://) |
-
----
-
-## Project Structure
+## Project structure
 
 ```
-LLM_PROJECT/
-├── index.html      # Main application (single-page app)
-├── chunker.js      # Text chunking utilities
-├── README.md       # This file
-└── PROJECT.md      # Project requirements document
+index.html          app shell (semantic HTML, inline SVG icons)
+css/app.css         design tokens, light/dark themes, responsive layout
+js/main.js          UI controller: library, chat, streaming, settings
+js/rag-worker.js    PDF parsing, chunking, embeddings, hybrid search, persistence
+js/llm-worker.js    WebLLM (WebGPU) / transformers.js (CPU) chat back-ends
+js/viewer.js        cited-page viewer with passage highlighting (PDF.js text layer)
+js/chunker.js       text clean-up and page-aware chunking        (unit-tested)
+js/retrieval.js     BM25, dense search, reciprocal rank fusion   (unit-tested)
+js/prompt.js        prompt building and citation parsing         (unit-tested)
+js/markdown.js      small, escape-first Markdown renderer        (unit-tested)
+js/store.js         IndexedDB wrapper
+js/config.js        pinned library versions and model catalogue
+coi-sw.js           service worker adding cross-origin isolation (CPU-only devices)
+samples/            two short fictional PDFs for the demo button
+tests/              node:test unit tests
 ```
+
+## Limitations
+
+- Small local models can still misread or over-summarise. Citations exist so every claim can be checked against the page.
+- Scanned PDFs without a text layer are rejected with a message; OCR is out of scope.
+- The context window is 4k tokens, so only the top passages (6 by default) reach the model, and the literature overview reads the opening passages of each document (with many documents, only those that fit in the window).
+- The first visit downloads the models (0.5–2.8 GB depending on the choice). Browsers may evict caches under storage pressure, so the app asks for persistent storage.
+- The CPU fallback is slow: expect tens of seconds per answer. GitHub Pages cannot send the COOP/COEP headers that multi-threaded WebAssembly needs, so on devices without WebGPU a tiny service worker (`coi-sw.js`) adds them, with a single reload on the first visit.
 
 ## Acknowledgments
 
-- [MLC-AI](https://mlc.ai/) for WebLLM
-- [Hugging Face](https://huggingface.co/) for Transformers.js
-- [Mozilla](https://mozilla.org/) for PDF.js
-
+[WebLLM / MLC](https://github.com/mlc-ai/web-llm), [Transformers.js](https://github.com/huggingface/transformers.js), [PDF.js](https://mozilla.github.io/pdf.js/), and the Qwen, Gemma, Llama and BGE model authors.
